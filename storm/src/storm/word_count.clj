@@ -16,7 +16,6 @@
 ;; position-bolt
 ;; pnl-bolt - joins transaction bolt
 
-
 (defn random-step
   "Produce a new value based on the previous value and a step size."
   [dp dt price]
