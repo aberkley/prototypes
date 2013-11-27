@@ -1,22 +1,57 @@
 (ns yahoo.core
-  (:require
-            [clojure.string :only [trim replace] :as string]
-            [clj-time.format :only [parse unparse]])
   (:use
+   [yahoo.parse]
    [clojure.pprint :only [pprint]]
-        [dk.ative.docjure.spreadsheet :as docjure]
-        [gloss.io :as g]
-        [net.cgrand.enlive-html]
-        [clj-time.core :only [local-date minus now days day month year]]
-        ))
+   [dk.ative.docjure.spreadsheet :as docjure]
+   [gloss.io :as g]
+   [net.cgrand.enlive-html]))
+
+;; live prices - grabs time/value pairs
+
+(defn live-price
+  [time-tags value-tags build-url sym]
+  (->> sym
+       build-url
+       java.net.URL.
+       html-resource
+       ((juxt
+         #(select % time-tags)
+         #(select % value-tags)))
+       (map (comp first :content first))
+       (map parse-datum)
+       (zipmap [:price/time :price/value])))
+
+(def live-price-google
+  (partial live-price
+           [:div#market-data-div :div#price-panel :span.nwp [:span (attr? :id)]]
+           [:div#market-data-div :div#price-panel :span.pr [:span (attr? :id)]]
+           #(str "https://www.google.co.uk/finance?q=" %)))
+
+(def live-price-bloomberg
+  (partial live-price
+           [:div#primary_content :div.ticker_header :p.fine_print]
+           [:div#primary_content :div.ticker_header :span.price]
+           #(str "http://www.bloomberg.com/quote/" %)))
+
+(comment
+  (live-price-google "LON:UKX")
+  (live-price-bloomberg "UKX:IND"))
+
+;; bloomberg
+
+(defn bb-live-price
+  [sym]
+  ;; write parser for bb time string
+  (->> sym
+       bb-snapshot-url
+       java.net.URL.
+       html-resource
+       ((juxt bb-live-time bb-live-value))
+       (map (comp first :content first))
+       (map parse-datum)
+       (zipmap [:price/time :price/value])))
 
 ;; enlive
-(defn table
-  [url]
-  (select
-   (html-resource
-    (java.net.URL. url))
-   [:table]))
 
 (defn select-rows
   [table tag]
@@ -25,33 +60,14 @@
         :when (seq row)]
     row))
 
-(defn parse-partial-date
-  [s]
-  (-> s
-      string/trim
-      (#(string/split % #" - Close"))
+(defn header
+  [html-]
+  (-> (select html- [:table])
+      (select-rows :th)
       first
-      ((partial parse (formatter "MMM dd")))
-      ((juxt month day))
-      ((partial apply merge [(year (today))]))
-      ((partial apply local-date))))
-
-(defn parse-datum
-  [str]
-  (let [parse-as (fn [f str] (try (f str)
-                                 (catch Exception e nil)))
-        date-format (clj-time.format/formatter "MMM dd, yyyy")]
-   (or (parse-as (comp bigdec #(string/replace % "," "") string/trim) str)
-       (parse-as (comp (partial parse date-format) string/trim) str)
-       (parse-as parse-partial-date str))))
-
-(defn parse-row
-  "returns row as a map or nil if cannot parse"
-  [row]
-  (->> row
-       (map :content)
-       (map first)
-       (map parse-datum)))
+      (map :content)
+      (map first)
+      (map string/trim)))
 
 (defn map-row-to-header
   [header row]
@@ -59,25 +75,15 @@
     (zipmap header row)))
 
 (defn data
-  [table]
-  (->> (select-rows table :td)
+  [html-]
+  (->> (select html- [:table])
+       (select-rows table :td)
        (map parse-row)
        (map (partial map-row-to-header (header table)))))
 
-(defn unparse-date
-  [dt]
-  (let [fmt-1 (formatter "MMM+dd")
-        fmt-2 (formatter "+yyyy")
-        s     "%2C"]
-    (-> ""
-        (str (unparse fmt-1 dt))
-        (str s)
-        (str (unparse fmt-2 dt)))))
-
 (defn historical-url
   [sym start end num]
-  (let [stem "https://www.google.co.uk/finance/historical"
-        date-format (formatter "MMM+dd%2C+yyyy")]
+  (let [stem "https://www.google.co.uk/finance/historical"]
     (-> stem
         (str "?q=" sym)
         (str "&startdate=" (unparse-date start))
@@ -88,7 +94,9 @@
   [sym start end num]
   (-> sym
       (historical-url start end num)
-      table
+      live-price-url
+      java.net.URL.
+      html-resource
       data))
 
 (defn recent-daily-prices
@@ -113,88 +121,8 @@
   "https://www.google.co.uk/finance/historical?q=INDEXFTSE:UKX&startdate=Nov+21%2C+2012&enddate=Nov+22%2C+2013&num=365"
   (ukx-data))
 
-(defn header
-  [table]
-  (->> (select-rows table :th)
-       first
-       (map :content)
-       (map first)
-       (map string/trim)))
 
-
-;; live google prices
-
-(defn live-price-url
-  [sym]
-  (str "https://www.google.co.uk/finance?q=" sym))
-
-(defn live-price-value
-  [html-]
-  (-> html-
-      (select [:div#market-data-div
-               :div#price-panel
-               :span.pr
-               [:span (attr? :id)]])
-      first
-      :content
-      first))
-
-(defn live-price-time
-  [html-]
-  (-> html-
-      (select [:div#market-data-div
-               :div#price-panel
-               :span.nwp])
-      first
-      :content
-      first))
-
-(defn live-price
-  [sym]
-  (->> sym
-       live-price-url
-       java.net.URL.
-       html-resource
-       ((juxt live-price-time live-price-value))
-       (map parse-datum)
-       (zipmap [:price/time :price/value])))
-
-(comment
-  (live-price "LON:SPX"))
-
-;; bloomberg
-
-
-(defn bb-snapshot-url
-  [sym]
-  (str "http://www.bloomberg.com/quote/" sym))
-
-(defn bb-live-price-html
-  [html-]
-
-  )
-
-(defn bb-live-value
-  [html-]
-  (-> html-
-      (select [:div#primary_content :div.ticker_header :span.price])))
-
-(defn bb-live-time
-  [html-]
-  (-> html-
-      (select [:div#primary_content :div.ticker_header :p.fine_print])))
-
-(defn bb-live-price
-  [sym]
-  ;; write parser for bb time string
-  (-> sym
-      bb-snapshot-url
-      java.net.URL.
-      html-resource
-      ((juxt bb-live-time bb-live-value))
-      ((partial map (comp first :content first)))
-      ((partial map parse-datum))
-      (zipmap [:price/time :price/value])))
+;; bb members
 
 (defn bb-members-url
   [sym]
@@ -257,68 +185,4 @@
 
 (comment
   (members-data "UKX:IND")
-  )
-
-(def herd-snippet "<form action=\"/herd_changes\" method=\"post\" id=\"animal_addition_form\">
-    <table>
-        <tr class=\"per_animal_row\">
-            <td>
-                <input type=\"text\" class=\"true_name\" name=\"true_name\"/>
-            </td>
-            <td>
-                <select class=\"species\" name=\"species\">
-                    <option selected=\"selected\">Bovine</option>
-                    <option>Equine</option>
-                </select>
-            </td>
-            <td>
-                <input type=\"text\" class=\"extra_display_info\" name=\"extra_display_info\"/>
-            </td>
-        </tr>
-        <tr>
-          <td colspan=\"3\" style=\"text-align: center\">
-            <input type=\"submit\" value=\"Make the Change\"/>
-          </td>
-        </tr>
-    </table>
-</form>")
-
-(def herd (html-snippet herd-snippet))
-
-(comment
-  (pprint herd)
-  (select herd [[:tr (attr= :class "per_animal_row")]])
-
-
-
-
-  )
-
-
-(comment
-  (select [{:tag :a
-            :attrs {:href "/quote/BA+:LN"
-                    :class "some_class"}
-            :content ["BAE Systems PLC"]}
-           {:tag :a
-            :attrs {
-                    :class "some__otherclass"}
-            :content ["Some other company"]}]
-          [(attr? :class)]))
-
-
-
-(comment
-
-  (select
-   [{:tag :td,
-     :attrs {:class "first_name"},
-     :content
-     ["\n          "
-      {:tag :a, :attrs {:href "/quote/AMEC:LN"}, :content ["AMEC PLC"]}
-      "\n        "]}
-    {:tag :td,
-     :attrs {:class "value"},
-     :content ["1.234"]}]
-   [[:td (but (attr= :class "value"))]])
   )
